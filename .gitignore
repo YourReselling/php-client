@@ -1,6 +1,13 @@
 .idea
 vendor
-composer.lock
 .phpunit.result.cache
 CLAUDE.md
 .claude/
+
+dist/
+
+.DS_Store
+
+__pycache__/
+
+artifacts/

@@ -1,8 +1,10 @@
 <?php
 
+declare(strict_types=1);
+
 namespace YourReselling;
 
-use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
 use YourReselling\Account\Account;
 use YourReselling\Announcements\Announcements;
@@ -12,13 +14,11 @@ use YourReselling\ContainerRegistry\ContainerRegistry;
 use YourReselling\DDoS\DDoS;
 use YourReselling\Dedicated\Dedicated;
 use YourReselling\Domains\Domains;
-use YourReselling\Exceptions\ParameterException;
 use YourReselling\Inference\Inference;
 use YourReselling\IpTunnels\IpTunnels;
 use YourReselling\Ipv6\Ipv6;
 use YourReselling\Kubernetes\Kubernetes;
 use YourReselling\LoadBalancer\LoadBalancer;
-use YourReselling\PbsStorage\PbsStorage;
 use YourReselling\Plesk\Plesk;
 use YourReselling\Ripe\Ripe;
 use YourReselling\Rootserver\Rootserver;
@@ -29,193 +29,138 @@ use YourReselling\SubReseller\SubReseller;
 use YourReselling\TeamSpeak\TeamSpeak;
 use YourReselling\VPN\VPN;
 
-class Client
+/**
+ * Reseller API client. api() exposes the complete, documented current API.
+ * Existing resource helpers remain available for migration from version 2.
+ */
+class Client extends Transport
 {
-    private $httpClient;
-    private Credentials $credentials;
-    private string $apiToken;
     private ?Account $accountHandler = null;
+
     private ?Announcements $announcementsHandler = null;
+
     private ?Billing $billingHandler = null;
+
     private ?DDoS $ddosHandler = null;
+
     private ?Domains $domainHandler = null;
+
     private ?Inference $inferenceHandler = null;
+
     private ?IpTunnels $ipTunnelsHandler = null;
+
     private ?Kubernetes $kubernetesHandler = null;
+
     private ?LoadBalancer $loadBalancerHandler = null;
-    private ?PbsStorage $pbsStorageHandler = null;
+
     private ?Plesk $pleskHandler = null;
+
     private ?Rootserver $rootserverHandler = null;
+
     private ?SubReseller $subResellerHandler = null;
+
     private ?TeamSpeak $teamspeakHandler = null;
+
     private ?VPN $vpnHandler = null;
+
     private ?Asn $asnHandler = null;
+
     private ?ContainerRegistry $containerRegistryHandler = null;
+
     private ?Dedicated $dedicatedHandler = null;
+
     private ?Ipv6 $ipv6Handler = null;
+
     private ?Ripe $ripeHandler = null;
+
     private ?S3Storage $s3StorageHandler = null;
+
     private ?Ssl $sslHandler = null;
+
     private ?StorageBox $storageBoxHandler = null;
 
-    public function __construct(string $token, string $version = 'v1', $httpClient = null, ?string $baseUrl = null)
+    /** $baseUrl is the URL before the version, e.g. https://resellingprovider.de/api/. */
+    public function __construct(string $token, string $version = 'v1', ?ClientInterface $httpClient = null, ?string $baseUrl = null)
     {
-        $this->apiToken = $token;
-        $this->credentials = new Credentials($token, $version, $baseUrl);
-        $this->setHttpClient($httpClient);
-    }
-
-    public function setHttpClient(?\GuzzleHttp\Client $httpClient = null): void
-    {
-        $this->httpClient = $httpClient ?: new \GuzzleHttp\Client([
-            'http_errors' => false,
-            'headers' => [
-                'Accept' => 'application/json',
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->apiToken,
-                'User-Agent' => 'ResellingProviderClient/2.1'
-            ],
-            'allow_redirects' => false,
-            'timeout' => 120
-        ]);
-    }
-
-    public function getHttpClient(): \GuzzleHttp\Client
-    {
-        return $this->httpClient;
-    }
-
-    public function getToken(): string
-    {
-        return $this->apiToken;
-    }
-
-    private function getCredentials(): Credentials
-    {
-        return $this->credentials;
-    }
-
-    private function buildUrl(string $actionPath): string
-    {
-        return $this->getCredentials()->getUrl() . $this->getCredentials()->getVersion() . '/' . $actionPath;
-    }
-
-    private function request(string $actionPath, array $params = [], string $method = 'GET', array $options = []): ResponseInterface
-    {
-        $url = $this->buildUrl($actionPath);
-
-        switch ($method) {
-            case 'GET':
-                return $this->getHttpClient()->get($url, ['query' => $params ?: null] + $options);
-            case 'POST':
-                return $this->getHttpClient()->post($url, ['json' => $params] + $options);
-            case 'PUT':
-                return $this->getHttpClient()->put($url, ['json' => $params] + $options);
-            case 'PATCH':
-                return $this->getHttpClient()->patch($url, ['json' => $params] + $options);
-            case 'DELETE':
-                return $this->getHttpClient()->delete($url, ['json' => $params] + $options);
-            default:
-                throw new ParameterException('Invalid HTTP method: ' . $method);
+        if (! preg_match('/^v[0-9]+$/', $version)) {
+            throw new \InvalidArgumentException('Version must have the form v1.');
         }
+        parent::__construct($token, rtrim($baseUrl ?? 'https://resellingprovider.de/api/', '/').'/'.$version, $httpClient);
     }
 
+    /** Access all registered endpoints with current request shapes and permission documentation. */
+    public function api(): Api
+    {
+        return new Api($this);
+    }
+
+    /** @return array<string|int, mixed> Legacy data-only decoder; send()->json() preserves pagination. */
     public function processRequest(ResponseInterface $response): array
     {
-        $statusCode = $response->getStatusCode();
-        $responseBody = $response->getBody()->__toString();
-        $result = json_decode($responseBody, true);
-
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            // Non-JSON response (gateway/timeout error page, empty body, ...).
-            // Surface the HTTP status and a short body snippet so callers can
-            // tell what actually happened instead of just "JSON decoding error".
-            $snippet = trim(substr($responseBody, 0, 300));
-
-            throw new \RuntimeException(
-                sprintf(
-                    'Unexpected non-JSON response (HTTP %d): %s',
-                    $statusCode,
-                    $snippet !== '' ? $snippet : '<empty response body>'
-                ),
-                $statusCode
-            );
-        }
-
-        if ($statusCode >= 400) {
-            $error = $result['error'] ?? [];
-            $message = $error['message'] ?? $result['message'] ?? 'API request failed';
-            throw new \RuntimeException($message, $statusCode);
-        }
-
-        return $result['data'] ?? $result;
+        return $this->legacyData($this->checked($response));
     }
 
+    /** @return array<string|int, mixed> */
+    private function legacyData(Response $response): array
+    {
+        $data = $response->data();
+
+        return is_array($data) ? $data : [];
+    }
+
+    /** @param array<string,mixed> $params @return array<string|int,mixed> */
     public function get(string $actionPath, array $params = []): array
     {
-        return $this->processRequest($this->request($actionPath, $params, 'GET'));
+        return $this->legacyData($this->send('GET', $actionPath, [], $params));
     }
 
+    /** @param array<string,mixed> $params @return array<string|int,mixed> */
     public function post(string $actionPath, array $params = []): array
     {
-        return $this->processRequest($this->request($actionPath, $params, 'POST'));
+        return $this->legacyData($this->send('POST', $actionPath, [], [], $params));
     }
 
+    /** @param array<string,mixed> $params @return array<string|int,mixed> */
     public function put(string $actionPath, array $params = []): array
     {
-        return $this->processRequest($this->request($actionPath, $params, 'PUT'));
+        return $this->legacyData($this->send('PUT', $actionPath, [], [], $params));
     }
 
+    /** @param array<string,mixed> $params @return array<string|int,mixed> */
     public function patch(string $actionPath, array $params = []): array
     {
-        return $this->processRequest($this->request($actionPath, $params, 'PATCH'));
+        return $this->legacyData($this->send('PATCH', $actionPath, [], [], $params));
     }
 
+    /** @param array<string,mixed> $params @return array<string|int,mixed> */
     public function delete(string $actionPath, array $params = []): array
     {
-        return $this->processRequest($this->request($actionPath, $params, 'DELETE'));
+        return $this->legacyData($this->send('DELETE', $actionPath, [], [], $params));
     }
 
-    /**
-     * A GET whose response is not JSON — a rendered file, an archive, an
-     * image. Returns the body untouched.
-     */
+    /** @param array<string,mixed> $params */
     public function getRaw(string $actionPath, array $params = []): string
     {
-        $response = $this->request($actionPath, $params, 'GET');
-
-        if ($response->getStatusCode() >= 400) {
-            $body = $response->getBody()->__toString();
-            $decoded = json_decode($body, true);
-            $message = $decoded['error']['message'] ?? $decoded['message'] ?? 'API request failed';
-            throw new \RuntimeException($message, $response->getStatusCode());
-        }
-
-        return $response->getBody()->__toString();
+        return $this->send('GET', $actionPath, [], $params)->text();
     }
 
+    /** @param array<string,mixed> $params */
     public function postRaw(string $actionPath, array $params = []): string
     {
-        $response = $this->request($actionPath, $params, 'POST');
-
-        if ($response->getStatusCode() >= 400) {
-            $body = $response->getBody()->__toString();
-            $decoded = json_decode($body, true);
-            $message = $decoded['error']['message'] ?? $decoded['message'] ?? 'API request failed';
-            throw new \RuntimeException($message, $response->getStatusCode());
-        }
-
-        return $response->getBody()->__toString();
+        return $this->send('POST', $actionPath, [], [], $params)->text();
     }
 
+    /** @param list<array{name:string,contents:mixed,filename?:string,headers?:array<string,string>}> $multipart */
     public function postMultipart(string $actionPath, array $multipart): array
     {
-        $url = $this->buildUrl($actionPath);
-        $response = $this->getHttpClient()->post($url, [
-            'multipart' => $multipart,
-            'headers' => ['Content-Type' => null],
-        ]);
-        return $this->processRequest($response);
+        $body = [];
+        foreach ($multipart as $part) {
+            $body[$part['name']] = isset($part['filename'])
+                ? new Upload($part['contents'], $part['filename'], $part['headers']['Content-Type'] ?? 'application/octet-stream')
+                : $part['contents'];
+        }
+
+        return $this->legacyData($this->send('POST', $actionPath, [], [], $body, true));
     }
 
     public function account(): Account
@@ -261,11 +206,6 @@ class Client
     public function loadBalancer(): LoadBalancer
     {
         return $this->loadBalancerHandler ??= new LoadBalancer($this);
-    }
-
-    public function pbsStorage(): PbsStorage
-    {
-        return $this->pbsStorageHandler ??= new PbsStorage($this);
     }
 
     public function plesk(): Plesk
